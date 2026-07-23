@@ -11,6 +11,10 @@ MODEL_ID = "anthropic.claude-sonnet-5"
 MAX_TOKENS = 8192
 
 
+class SummarizationFailed(Exception):
+    """The model returned a response the summarizer cannot parse."""
+
+
 class Summarizer:
     def __init__(self, client) -> None:
         self._client = client
@@ -27,7 +31,14 @@ class Summarizer:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": build_user_message(meta, transcript)}],
         )
-        text = next(block.text for block in response.content if block.type == "text")
+        text = next(
+            (block.text for block in response.content if block.type == "text"),
+            None,
+        )
+        if text is None:
+            raise SummarizationFailed(
+                f"no text block for {meta.video_id}; stop_reason={response.stop_reason}"
+            )
         return Summary.from_dict(json.loads(text))
 
 

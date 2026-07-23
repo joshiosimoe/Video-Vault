@@ -2,9 +2,11 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.shared.models import Transcript, TranscriptSegment, VideoMeta
 from src.summarize.schema import SUMMARY_SCHEMA
-from src.summarize.summarizer import Summarizer
+from src.summarize.summarizer import SummarizationFailed, Summarizer
 
 META = VideoMeta(
     video_id="abc123",
@@ -33,6 +35,12 @@ def _fake_client(payload: dict) -> MagicMock:
     client.messages.create.return_value = SimpleNamespace(
         content=[SimpleNamespace(type="text", text=json.dumps(payload))]
     )
+    return client
+
+
+def _fake_client_with_no_text_block(stop_reason: str) -> MagicMock:
+    client = MagicMock()
+    client.messages.create.return_value = SimpleNamespace(content=[], stop_reason=stop_reason)
     return client
 
 
@@ -67,6 +75,14 @@ def test_summarize_requests_structured_output():
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["output_config"]["format"]["schema"] == SUMMARY_SCHEMA
     assert kwargs["output_config"]["effort"] == "low"
+
+
+def test_summarize_raises_when_response_has_no_text_block():
+    client = _fake_client_with_no_text_block("refusal")
+    with pytest.raises(SummarizationFailed) as exc_info:
+        Summarizer(client).summarize(META, TRANSCRIPT)
+    assert "abc123" in str(exc_info.value)
+    assert "refusal" in str(exc_info.value)
 
 
 def test_schema_satisfies_structured_output_constraints():
