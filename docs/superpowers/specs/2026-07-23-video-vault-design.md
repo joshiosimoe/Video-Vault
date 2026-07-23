@@ -53,11 +53,11 @@ EventBridge Scheduler (rate: 15 minutes)
                   │
                   ▼
         Step Functions (one execution per video)
-          1. FetchTranscript   → S3 raw transcript, returns S3 key
+          1. FetchTranscript   → S3 transcripts/, returns S3 key
           2. Choice: has_transcript?
                ├─ no  → WriteStubNote
                └─ yes → 3. Summarize      → Bedrock, structured JSON output
-                        4. RenderAndCommit → markdown → GitHub Contents API
+                        4. RenderAndCommit → S3 summaries/ + markdown to GitHub
           5. MarkDone → DynamoDB status
           Catch (any state) → MarkFailed → DynamoDB status + error
                   │
@@ -103,11 +103,42 @@ Partition key `video_id` (S). No sort key. On-demand billing.
 
 Serves as both the dedupe table and the retry ledger.
 
-### S3 — `video-vault-transcripts`
+### S3 — `video-vault-content`
 
-Key format: `transcripts/{video_id}.json`. Raw provider response, unmodified.
+Two prefixes:
 
-Lifecycle: none. Volume is ~5MB/month, ~58MB/year. Free tier is 5GB; beyond that, ~$0.0013/month.
+| Key | Contents |
+|---|---|
+| `transcripts/{video_id}.json` | Raw provider response, unmodified. Written once. |
+| `summaries/{video_id}.json` | Self-contained summary artifact — video metadata plus the validated summary object. Rewritten on every summarization. |
+
+The summary artifact is deliberately self-contained (it repeats title, channel, URL, and duration rather than referencing DynamoDB) so a downstream consumer can ingest a single object without a second lookup:
+
+```json
+{
+  "video_id": "dQw4w9WgXcQ",
+  "title": "How Kubernetes Scheduling Actually Works",
+  "channel": "Some Channel",
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "published_at": "2026-07-01T12:00:00Z",
+  "duration_seconds": 3862,
+  "summarized_at": "2026-07-22",
+  "note_path": "Video Vault/2026/How Kubernetes Scheduling Actually Works-dQw4w9WgXcQ.md",
+  "summary": {
+    "verdict": "...",
+    "tldr": "...",
+    "takeaways": ["..."],
+    "sections": [{"start_seconds": 1120, "title": "...", "summary": "..."}],
+    "tags": ["kubernetes"]
+  }
+}
+```
+
+**Why this exists:** a planned follow-on RAG project needs to ingest these summaries. Reading them out of the private GitHub repo would mean cloning or hammering the GitHub API; reading them from S3 means native event-driven ingestion via S3 notifications, with GitHub left as a pure delivery channel for Obsidian. Adding the write now costs four lines. Retrofitting it later means re-processing the entire back catalog.
+
+The `sections` array doubles as a natural chunk boundary, and each section's `start_seconds` lets a downstream citation deep-link to the exact moment in the source video.
+
+Lifecycle: none. Volume is ~6MB/month, ~70MB/year across both prefixes. Free tier is 5GB; beyond that, well under a cent per month.
 
 Block all public access. Server-side encryption with S3-managed keys.
 
@@ -122,7 +153,7 @@ Standard workflow. One execution per video, started by **EventBridge Pipes** wit
 1. **FetchTranscript** — Lambda. Calls the configured `TranscriptProvider`, writes the raw response to S3, updates DynamoDB to `transcribed`. Returns `{video_id, transcript_s3_key, has_transcript}`. Retry: 3 attempts, exponential backoff, 2s base, 2.0 multiplier.
 2. **HasTranscript?** — Choice state on `has_transcript`.
 3. **Summarize** — Lambda. Reads the transcript from S3, calls Bedrock, returns the validated summary object (~2KB, safely under the payload limit). Updates DynamoDB to `summarized`. Retry: 3 attempts on `ThrottlingException` and `ServiceUnavailable`, exponential backoff.
-4. **RenderAndCommit** — Lambda. Renders markdown from the summary object, commits to the vault repo via the GitHub Contents API. Retry: 3 attempts; on 409 conflict, re-read the file SHA and retry.
+4. **RenderAndCommit** — Lambda. Writes the self-contained summary artifact to `summaries/{video_id}.json`, renders markdown from the summary object, and commits to the vault repo via the GitHub Contents API. Retry: 3 attempts; on 409 conflict, re-read the file SHA and retry. The S3 write happens before the commit so a GitHub outage does not cost the summary.
 5. **WriteStubNote** — Lambda. For videos with no captions: commits a note with frontmatter, the link, and `status: no-transcript`. You still get a vault entry saying "this one needs watching."
 6. **MarkDone** — DynamoDB SDK integration. Sets `status: done` and `note_path`.
 7. **MarkFailed** — Catch target for every state. Sets `status: failed`, records the error, increments `attempts`.
@@ -259,7 +290,7 @@ Structured JSON logging from all Lambdas with `video_id` as a correlation key.
 | Bedrock — 80 videos × ~$0.04 | ~$3.20 |
 | Transcript API | $0 (80 of ~100 free tier) |
 | Lambda, EventBridge, SQS, DynamoDB, Step Functions | $0 (free tier) |
-| S3 (~5MB/month) | ~$0 |
+| S3 (~6MB/month) | ~$0 |
 | SSM Parameter Store (standard tier) | $0 |
 | CloudWatch alarms and logs | ~$0–0.50 |
 | **Total** | **~$3–4** |
@@ -316,6 +347,18 @@ These cannot be automated and must be done once before first deploy:
 7. Create a fine-grained GitHub PAT scoped to that repo; store it in SSM.
 8. Enable Bedrock model access for `anthropic.claude-sonnet-5` in the target region. Verify availability — newer models typically reach `us-east-1` and `us-west-2` first.
 9. Install the Obsidian Git community plugin; configure auto-pull interval.
+
+## Forward compatibility with the planned RAG project
+
+A follow-on project will index these summaries alongside class materials (docx, pptx, xlsx, pdf) into a retrieval system. Exactly one accommodation is made for it here — the `summaries/` S3 write described above. Everything else the RAG needs already falls out of decisions made on their own merits:
+
+- The transcript archive gives the RAG full-text chunks for recall the summary drops.
+- The `sections` array with `start_seconds` gives chunk boundaries and timestamp-deep-linked citations.
+- Both projects live in one AWS account and region, so the RAG reads these buckets via IAM rather than cross-account roles.
+
+If the RAG is built with Terraform rather than CDK, this stack publishes bucket names and ARNs to SSM Parameter Store so Terraform can consume them via `data "aws_ssm_parameter"` — a one-directional dependency with no CloudFormation export coupling.
+
+**Explicitly out of scope now:** no chunking, no embeddings, no vector store, no retrieval. Building any of that before a corpus exists is speculative. This project ships first and produces the corpus.
 
 ## Open questions
 

@@ -20,6 +20,7 @@
 - Every Lambda gets its own IAM role with least-privilege policies. No shared roles, no wildcards on resource ARNs except where AWS requires them.
 - All timestamps stored as ISO 8601 UTC strings.
 - Vault note paths follow `Video Vault/{year}/{slug}-{video_id}.md`.
+- One S3 bucket holds two prefixes: `transcripts/{video_id}.json` (raw provider response) and `summaries/{video_id}.json` (self-contained summary artifact). Env var is `CONTENT_BUCKET`.
 - Commit after every task. Conventional commit prefixes (`feat:`, `test:`, `chore:`, `docs:`).
 - Run `ruff check . && ruff format --check . && pytest` before every commit.
 
@@ -2031,7 +2032,7 @@ from src.shared.models import Transcript, TranscriptSegment, VideoMeta
 from src.shared.state_store import StateStore, Status
 from src.transcript.fake_provider import FakeTranscriptProvider
 
-BUCKET = "vv-transcripts"
+BUCKET = "vv-content"
 TABLE = "vv-state"
 
 META = VideoMeta("abc123", "T", "C", "2026-07-01T00:00:00Z", 600)
@@ -2052,7 +2053,7 @@ def aws(monkeypatch):
             AttributeDefinitions=[{"AttributeName": "video_id", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
-        monkeypatch.setenv("TRANSCRIPT_BUCKET", BUCKET)
+        monkeypatch.setenv("CONTENT_BUCKET", BUCKET)
         monkeypatch.setenv("STATE_TABLE", TABLE)
         StateStore(TABLE).try_insert(META)
         yield
@@ -2231,7 +2232,7 @@ def _existing_object(bucket: str, key: str) -> bool:
 
 def handler(event: dict, context) -> dict:
     video_id = event["video_id"]
-    bucket = os.environ["TRANSCRIPT_BUCKET"]
+    bucket = os.environ["CONTENT_BUCKET"]
     store = StateStore(os.environ["STATE_TABLE"])
     key = _transcript_key(video_id)
 
@@ -2296,7 +2297,7 @@ from src.handlers import summarize as summarize_handler
 from src.shared.models import Summary, Transcript, TranscriptSegment, VideoMeta
 from src.shared.state_store import StateStore, Status
 
-BUCKET = "vv-transcripts"
+BUCKET = "vv-content"
 TABLE = "vv-state"
 
 META = VideoMeta("abc123", "T", "C", "2026-07-01T00:00:00Z", 600)
@@ -2333,7 +2334,7 @@ def aws(monkeypatch):
             AttributeDefinitions=[{"AttributeName": "video_id", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
-        monkeypatch.setenv("TRANSCRIPT_BUCKET", BUCKET)
+        monkeypatch.setenv("CONTENT_BUCKET", BUCKET)
         monkeypatch.setenv("STATE_TABLE", TABLE)
         StateStore(TABLE).try_insert(META)
         yield
@@ -2410,7 +2411,7 @@ def handler(event: dict, context) -> dict:
     store = StateStore(os.environ["STATE_TABLE"])
 
     body = boto3.client("s3").get_object(
-        Bucket=os.environ["TRANSCRIPT_BUCKET"], Key=event["transcript_s3_key"]
+        Bucket=os.environ["CONTENT_BUCKET"], Key=event["transcript_s3_key"]
     )["Body"].read()
     transcript = Transcript.from_dict(json.loads(body))
 
@@ -2437,21 +2438,28 @@ git commit -m "feat: add summarize handler reading transcripts from S3"
 ### Task 13: RenderAndCommit and stub note handlers
 
 **Files:**
+- Create: `src/shared/artifacts.py`
 - Create: `src/handlers/render_commit.py`
 - Test: `tests/unit/test_render_commit_handler.py`
 
 **Interfaces:**
 - Consumes: `render_note`, `render_stub_note`, `note_path`, `VaultCommitter`, `StateStore`.
-- Produces:
-  - `handler(event, context) -> dict` — commits the full note. Input is the Task 12 output.
-  - `stub_handler(event, context) -> dict` — commits a no-transcript note. Input is `{"video_id": ...}`.
+- Produces, in `src/shared/artifacts.py` (shared with the re-summarization script in Task 20):
+  - `build_summary_artifact(meta, summary, note_path_value, summarized_at) -> dict`
+  - `write_summary_artifact(artifact: dict, bucket: str, s3_client=None) -> None`
+- Produces, in `src/handlers/render_commit.py`:
+  - `handler(event, context) -> dict` — writes `summaries/{video_id}.json` to S3, then commits the full note. Input is the Task 12 output.
+  - `stub_handler(event, context) -> dict` — commits a no-transcript note. Writes no summary artifact (there is no summary). Input is `{"video_id": ...}`.
   - Both return `{"video_id", "note_path"}`.
+
+**Ordering matters:** the S3 write happens *before* the GitHub commit. A GitHub outage then costs a retry, not a re-summarization — and the summary artifact is what the planned RAG project ingests, so it is the more valuable of the two writes.
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/unit/test_render_commit_handler.py`:
 
 ```python
+import json
 from dataclasses import asdict
 
 import boto3
@@ -2463,6 +2471,7 @@ from src.shared.models import Section, Summary, VideoMeta
 from src.shared.state_store import StateStore, Status
 
 TABLE = "vv-state"
+BUCKET = "vv-content"
 META = VideoMeta("abc123", "A Title", "A Channel", "2026-07-01T00:00:00Z", 600)
 SUMMARY = Summary(
     verdict="Worth it.",
@@ -2484,6 +2493,7 @@ class FakeCommitter:
 @pytest.fixture
 def aws(monkeypatch):
     with mock_aws():
+        boto3.client("s3", region_name="us-east-1").create_bucket(Bucket=BUCKET)
         boto3.client("dynamodb", region_name="us-east-1").create_table(
             TableName=TABLE,
             KeySchema=[{"AttributeName": "video_id", "KeyType": "HASH"}],
@@ -2491,8 +2501,16 @@ def aws(monkeypatch):
             BillingMode="PAY_PER_REQUEST",
         )
         monkeypatch.setenv("STATE_TABLE", TABLE)
+        monkeypatch.setenv("CONTENT_BUCKET", BUCKET)
         StateStore(TABLE).try_insert(META)
         yield
+
+
+def _artifact(video_id: str) -> dict:
+    body = boto3.client("s3", region_name="us-east-1").get_object(
+        Bucket=BUCKET, Key=f"summaries/{video_id}.json"
+    )["Body"].read()
+    return json.loads(body)
 
 
 def test_commits_rendered_note_and_marks_done(aws, monkeypatch):
@@ -2514,6 +2532,37 @@ def test_commits_rendered_note_and_marks_done(aws, monkeypatch):
     assert item["note_path"] == result["note_path"]
 
 
+def test_writes_self_contained_summary_artifact_to_s3(aws, monkeypatch):
+    monkeypatch.setattr(render_commit, "_build_committer", lambda: FakeCommitter())
+
+    render_commit.handler({"video_id": "abc123", "summary": asdict(SUMMARY)}, None)
+
+    artifact = _artifact("abc123")
+    assert artifact["video_id"] == "abc123"
+    assert artifact["title"] == "A Title"
+    assert artifact["channel"] == "A Channel"
+    assert artifact["url"] == "https://www.youtube.com/watch?v=abc123"
+    assert artifact["duration_seconds"] == 600
+    assert artifact["note_path"] == "Video Vault/2026/A Title-abc123.md"
+    assert artifact["summary"]["verdict"] == "Worth it."
+    assert artifact["summary"]["sections"][0]["start_seconds"] == 60
+
+
+def test_writes_artifact_before_committing(aws, monkeypatch):
+    """A GitHub failure must not cost the summary artifact."""
+
+    class ExplodingCommitter:
+        def commit_note(self, path, content, message):
+            raise RuntimeError("github is down")
+
+    monkeypatch.setattr(render_commit, "_build_committer", ExplodingCommitter)
+
+    with pytest.raises(RuntimeError):
+        render_commit.handler({"video_id": "abc123", "summary": asdict(SUMMARY)}, None)
+
+    assert _artifact("abc123")["video_id"] == "abc123"
+
+
 def test_stub_handler_commits_no_transcript_note(aws, monkeypatch):
     fake = FakeCommitter()
     monkeypatch.setattr(render_commit, "_build_committer", lambda: fake)
@@ -2523,6 +2572,17 @@ def test_stub_handler_commits_no_transcript_note(aws, monkeypatch):
     _, content, _ = fake.commits[0]
     assert "status: no-transcript" in content
     assert StateStore(TABLE).get("abc123")["status"] == Status.DONE
+
+
+def test_stub_handler_writes_no_summary_artifact(aws, monkeypatch):
+    monkeypatch.setattr(render_commit, "_build_committer", lambda: FakeCommitter())
+
+    render_commit.stub_handler({"video_id": "abc123"}, None)
+
+    listing = boto3.client("s3", region_name="us-east-1").list_objects_v2(
+        Bucket=BUCKET, Prefix="summaries/"
+    )
+    assert listing.get("KeyCount", 0) == 0
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2530,7 +2590,55 @@ def test_stub_handler_commits_no_transcript_note(aws, monkeypatch):
 Run: `pytest tests/unit/test_render_commit_handler.py -v`
 Expected: FAIL with `ImportError: cannot import name 'render_commit'`
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Write the shared artifact module**
+
+`src/shared/artifacts.py`:
+
+```python
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+
+import boto3
+
+from src.notes.renderer import WATCH_URL
+from src.shared.models import Summary, VideoMeta
+
+
+def build_summary_artifact(
+    meta: VideoMeta, summary: Summary, note_path_value: str, summarized_at: str
+) -> dict:
+    """Self-contained record for downstream consumers (e.g. the planned RAG).
+
+    Deliberately repeats video metadata so an ingester can process a single
+    S3 object without a DynamoDB lookup. The sections array doubles as a
+    chunk boundary, and each start_seconds supports timestamp-linked citations.
+    """
+    return {
+        "video_id": meta.video_id,
+        "title": meta.title,
+        "channel": meta.channel,
+        "url": WATCH_URL.format(video_id=meta.video_id),
+        "published_at": meta.published_at,
+        "duration_seconds": meta.duration_seconds,
+        "summarized_at": summarized_at,
+        "note_path": note_path_value,
+        "summary": asdict(summary),
+    }
+
+
+def write_summary_artifact(artifact: dict, bucket: str, s3_client=None) -> None:
+    client = s3_client or boto3.client("s3")
+    client.put_object(
+        Bucket=bucket,
+        Key=f"summaries/{artifact['video_id']}.json",
+        Body=json.dumps(artifact).encode(),
+        ContentType="application/json",
+    )
+```
+
+- [ ] **Step 4: Write the handler**
 
 `src/handlers/render_commit.py`:
 
@@ -2541,6 +2649,7 @@ import os
 from datetime import datetime, timezone
 
 from src.notes.renderer import note_path, render_note, render_stub_note
+from src.shared.artifacts import build_summary_artifact, write_summary_artifact
 from src.shared.config import get_parameter
 from src.shared.models import Summary, VideoMeta
 from src.shared.state_store import StateStore, Status
@@ -2585,6 +2694,14 @@ def handler(event: dict, context) -> dict:
     meta = _load_meta(store, event["video_id"])
     summary = Summary.from_dict(event["summary"])
     today = _today()
+    path = note_path(meta)
+
+    # S3 first: a GitHub outage should cost a retry, not the summary.
+    write_summary_artifact(
+        build_summary_artifact(meta, summary, path, today),
+        bucket=os.environ["CONTENT_BUCKET"],
+    )
+
     content = render_note(meta, summary, saved_at=today, summarized_at=today)
     return _commit(store, meta, content, "feat: add note")
 
@@ -2598,16 +2715,16 @@ def stub_handler(event: dict, context) -> dict:
     return _commit(store, meta, content, "feat: add stub note")
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `pytest tests/unit/test_render_commit_handler.py -v`
-Expected: 2 passed.
+Expected: 5 passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/handlers/render_commit.py tests/unit/test_render_commit_handler.py
-git commit -m "feat: add render and commit handlers for full and stub notes"
+git add src/shared/artifacts.py src/handlers/render_commit.py tests/unit/test_render_commit_handler.py
+git commit -m "feat: add render and commit handlers with S3 summary artifact"
 ```
 
 ---
@@ -2827,7 +2944,9 @@ git commit -m "feat: add poller handler with dedupe, reconcile, and retry sweeps
 
 **Interfaces:**
 - Consumes: `VideoVaultStack` from Task 1.
-- Produces: stack attributes `self.state_table`, `self.transcript_bucket`, `self.queue`, `self.dlq` used by Tasks 16–19.
+- Produces: stack attributes `self.state_table`, `self.content_bucket`, `self.queue`, `self.dlq` used by Tasks 16–19.
+
+The content bucket holds two prefixes — `transcripts/` (raw provider responses) and `summaries/` (self-contained summary artifacts). Its name is published to SSM at `/video-vault/content-bucket` so a separately-managed downstream stack (the planned RAG, likely Terraform) can discover it via `data "aws_ssm_parameter"` without a CloudFormation export coupling.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2854,7 +2973,7 @@ def test_state_table_is_on_demand_with_video_id_key():
     )
 
 
-def test_transcript_bucket_blocks_public_access_and_encrypts():
+def test_content_bucket_blocks_public_access_and_encrypts():
     _template().has_resource_properties(
         "AWS::S3::Bucket",
         {
@@ -2878,6 +2997,13 @@ def test_queue_has_dead_letter_queue_with_three_receives():
 
 def test_creates_exactly_two_queues():
     _template().resource_count_is("AWS::SQS::Queue", 2)
+
+
+def test_publishes_content_bucket_name_to_ssm():
+    _template().has_resource_properties(
+        "AWS::SSM::Parameter",
+        {"Name": "/video-vault/content-bucket", "Type": "String"},
+    )
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2894,6 +3020,7 @@ from aws_cdk import Duration, RemovalPolicy, Stack
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sqs as sqs
+from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
 
@@ -2912,9 +3039,9 @@ class VideoVaultStack(Stack):
             point_in_time_recovery=True,
         )
 
-        self.transcript_bucket = s3.Bucket(
+        self.content_bucket = s3.Bucket(
             self,
-            "TranscriptBucket",
+            "ContentBucket",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
@@ -2936,12 +3063,20 @@ class VideoVaultStack(Stack):
             enforce_ssl=True,
             dead_letter_queue=sqs.DeadLetterQueue(max_receive_count=3, queue=self.dlq),
         )
+
+        # Discovery seam for downstream stacks (see the RAG note in the spec).
+        ssm.StringParameter(
+            self,
+            "ContentBucketName",
+            parameter_name="/video-vault/content-bucket",
+            string_value=self.content_bucket.bucket_name,
+        )
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/infra/test_storage.py -v`
-Expected: 4 passed.
+Expected: 5 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -2960,7 +3095,7 @@ git commit -m "feat: add DynamoDB table, transcript bucket, and SQS queues"
 - Test: `tests/infra/test_lambdas.py`
 
 **Interfaces:**
-- Consumes: `self.state_table`, `self.transcript_bucket`, `self.queue`.
+- Consumes: `self.state_table`, `self.content_bucket`, `self.queue`.
 - Produces: stack attributes `self.fn_poller`, `self.fn_fetch`, `self.fn_summarize`, `self.fn_commit`, `self.fn_stub`.
 
 **Configuration:** the stack reads these from CDK context (`cdk.json` or `-c` flags): `playlist_id`, `vault_repo_owner`, `vault_repo_name`, `bedrock_region`.
@@ -3038,6 +3173,23 @@ def test_each_function_has_its_own_role():
         for fn in template.find_resources("AWS::Lambda::Function").values()
     }
     assert len(roles) == 5
+
+
+def _policies_granting(action: str) -> list[dict]:
+    template = _template()
+    matches = []
+    for policy in template.find_resources("AWS::IAM::Policy").values():
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]:
+            actions = statement.get("Action")
+            actions = actions if isinstance(actions, list) else [actions]
+            if action in actions:
+                matches.append(policy)
+    return matches
+
+
+def test_exactly_one_function_can_write_summaries():
+    """Least privilege: only RenderCommit writes to S3. The stub handler does not."""
+    assert len(_policies_granting("s3:PutObject")) == 1
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -3080,7 +3232,7 @@ Add to the end of `VideoVaultStack.__init__`:
 
         common_env = {
             "STATE_TABLE": self.state_table.table_name,
-            "TRANSCRIPT_BUCKET": self.transcript_bucket.bucket_name,
+            "CONTENT_BUCKET": self.content_bucket.bucket_name,
         }
 
         def make_function(name: str, handler: str, env: dict, timeout_min: int):
@@ -3129,7 +3281,7 @@ Add to the end of `VideoVaultStack.__init__`:
             {"TRANSCRIPT_API_KEY_PARAM": "/video-vault/transcript-api-key"},
             timeout_min=2,
         )
-        self.transcript_bucket.grant_read_write(self.fn_fetch)
+        self.content_bucket.grant_read_write(self.fn_fetch)
         grant_ssm(self.fn_fetch, ["transcript-api-key"])
 
         self.fn_summarize = make_function(
@@ -3138,7 +3290,7 @@ Add to the end of `VideoVaultStack.__init__`:
             {"BEDROCK_REGION": bedrock_region},
             timeout_min=10,
         )
-        self.transcript_bucket.grant_read(self.fn_summarize)
+        self.content_bucket.grant_read(self.fn_summarize)
         self.fn_summarize.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel"],
@@ -3159,7 +3311,10 @@ Add to the end of `VideoVaultStack.__init__`:
             "RenderCommitFunction", "handlers.render_commit.handler", commit_env, 2
         )
         grant_ssm(self.fn_commit, ["github-token"])
+        # Writes summaries/{video_id}.json for downstream consumers.
+        self.content_bucket.grant_put(self.fn_commit)
 
+        # The stub handler writes no summary artifact, so it gets no S3 grant.
         self.fn_stub = make_function(
             "StubNoteFunction", "handlers.render_commit.stub_handler", commit_env, 2
         )
@@ -3169,7 +3324,7 @@ Add to the end of `VideoVaultStack.__init__`:
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `pytest tests/infra/test_lambdas.py -v`
-Expected: 5 passed.
+Expected: 6 passed.
 
 > Bundling requires Docker running locally. If `pytest` fails with a Docker error, start Docker Desktop and re-run.
 
@@ -3704,7 +3859,7 @@ from scripts.resummarize import resummarize
 from src.shared.models import Summary, Transcript, TranscriptSegment, VideoMeta
 from src.shared.state_store import StateStore
 
-BUCKET = "vv-transcripts"
+BUCKET = "vv-content"
 TABLE = "vv-state"
 META = VideoMeta("abc123", "A Title", "Chan", "2026-07-01T00:00:00Z", 600)
 TRANSCRIPT = Transcript(
@@ -3765,6 +3920,22 @@ def test_resummarize_commits_regenerated_note_without_refetching(aws):
     assert message.startswith("chore: re-summarize")
 
 
+def test_resummarize_rewrites_the_summary_artifact(aws):
+    resummarize(
+        video_ids=["abc123"],
+        s3_client=aws,
+        store=StateStore(TABLE),
+        summarizer=FakeSummarizer(),
+        committer=FakeCommitter(),
+        bucket=BUCKET,
+    )
+
+    body = aws.get_object(Bucket=BUCKET, Key="summaries/abc123.json")["Body"].read()
+    artifact = json.loads(body)
+    assert artifact["video_id"] == "abc123"
+    assert artifact["summary"]["verdict"] == "v"
+
+
 def test_resummarize_skips_videos_without_archived_transcript(aws):
     StateStore(TABLE).try_insert(
         VideoMeta("missing", "Gone", "Chan", "2026-07-01T00:00:00Z", 60)
@@ -3809,6 +3980,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from src.notes.renderer import note_path, render_note
+from src.shared.artifacts import build_summary_artifact, write_summary_artifact
 from src.shared.config import get_parameter
 from src.shared.models import Transcript, VideoMeta
 from src.shared.state_store import StateStore, Status
@@ -3859,6 +4031,11 @@ def resummarize(
         content = render_note(meta, summary, saved_at=today, summarized_at=today)
         path = note_path(meta)
 
+        write_summary_artifact(
+            build_summary_artifact(meta, summary, path, today),
+            bucket=bucket,
+            s3_client=s3_client,
+        )
         committer.commit_note(path, content, f"chore: re-summarize {meta.title}")
         store.set_status(video_id, Status.DONE, note_path=path)
         committed.append(path)
@@ -3894,7 +4071,7 @@ def main() -> None:
         store=store,
         summarizer=build_summarizer(),
         committer=committer,
-        bucket=os.environ["TRANSCRIPT_BUCKET"],
+        bucket=os.environ["CONTENT_BUCKET"],
     )
 
 
@@ -3905,7 +4082,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/unit/test_resummarize.py -v`
-Expected: 2 passed.
+Expected: 3 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -4175,5 +4352,7 @@ After all tasks, confirm end to end:
 - [ ] Save a video with captions disabled; verify a stub note appears
 - [ ] Check CloudWatch: one Step Functions execution succeeded, no alarms in ALARM state
 - [ ] Confirm the `VideoVault/TranscriptCalls` metric has data points (proves EMF extraction works)
+- [ ] Confirm `s3://<content-bucket>/summaries/<video_id>.json` exists and is self-contained (title, url, duration, sections with `start_seconds` — no DynamoDB lookup needed to read it)
+- [ ] Confirm no `summaries/` object was written for the no-captions video
 - [ ] Confirm DynamoDB shows `status: done` for both videos
 - [ ] Re-run one video through `scripts/resummarize.py` and confirm the note is updated with no new transcript API call
