@@ -1,3 +1,5 @@
+import yaml
+
 from src.notes.renderer import (
     format_timestamp,
     note_path,
@@ -40,7 +42,7 @@ def test_format_timestamp_zero():
 
 
 def test_slugify_strips_filesystem_unsafe_characters():
-    assert slugify('How "Scheduling" Works: A Deep/Dive') == 'How "Scheduling" Works A DeepDive'
+    assert slugify('How "Scheduling" Works: A Deep/Dive') == "How Scheduling Works A DeepDive"
 
 
 def test_slugify_truncates_and_strips_trailing_dots():
@@ -73,3 +75,32 @@ def test_render_stub_note_marks_missing_transcript():
     assert "status: no-transcript" in out
     assert "no captions available" in out
     assert "https://www.youtube.com/watch?v=dQw4w9WgXcQ" in out
+
+
+def test_render_note_frontmatter_round_trips_through_yaml():
+    meta = VideoMeta(
+        video_id="rocket9XYZa",
+        title="Rocket Launch \U0001f680 Highlights",
+        channel="Space Channel",
+        published_at="2026-07-01T12:00:00Z",
+        duration_seconds=125,
+    )
+    summary = Summary(
+        verdict="Worth watching.",
+        tldr="Rockets go up.",
+        takeaways=["Liftoff was clean"],
+        sections=[Section(start_seconds=0, title="Launch", summary="Liftoff.")],
+        tags=["space:launch", "rockets"],
+    )
+
+    out = render_note(meta, summary, saved_at="2026-07-22", summarized_at="2026-07-22")
+
+    _, frontmatter_block, _ = out.split("---\n", 2)
+    parsed = yaml.safe_load(frontmatter_block)
+
+    assert parsed["title"] == meta.title
+    assert isinstance(parsed["title"].encode("utf-8"), bytes)
+
+    assert isinstance(parsed["tags"], list)
+    assert all(isinstance(tag, str) for tag in parsed["tags"])
+    assert "space:launch" in parsed["tags"]

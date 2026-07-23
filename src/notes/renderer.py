@@ -8,7 +8,7 @@ from src.shared.models import Summary, VideoMeta
 WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
 TIMESTAMP_URL = "https://www.youtube.com/watch?v={video_id}&t={seconds}"
 
-_UNSAFE_CHARS = re.compile(r"[<>:/\\|?*\x00-\x1f]")
+_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -32,8 +32,13 @@ def note_path(meta: VideoMeta) -> str:
 
 
 def _yaml_str(value: str) -> str:
-    """JSON string literals are valid YAML strings and handle all escaping."""
-    return json.dumps(value)
+    """JSON string literals are valid YAML strings and handle all escaping.
+
+    ensure_ascii=False is required: the default \\uXXXX escaping emits UTF-16
+    surrogate pairs for characters above U+FFFF (e.g. emoji), which JSON
+    readers recombine but YAML readers do not, corrupting the value.
+    """
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _frontmatter(meta: VideoMeta, saved_at: str, extra: dict[str, str]) -> list[str]:
@@ -54,7 +59,7 @@ def _frontmatter(meta: VideoMeta, saved_at: str, extra: dict[str, str]) -> list[
 
 
 def render_note(meta: VideoMeta, summary: Summary, saved_at: str, summarized_at: str) -> str:
-    tags = ", ".join(["video-vault", *summary.tags])
+    tags = ", ".join(_yaml_str(tag) for tag in ["video-vault", *summary.tags])
     lines = _frontmatter(
         meta,
         saved_at,
@@ -91,10 +96,11 @@ def render_note(meta: VideoMeta, summary: Summary, saved_at: str, summarized_at:
 
 
 def render_stub_note(meta: VideoMeta, saved_at: str, reason: str) -> str:
+    tags = ", ".join(_yaml_str(tag) for tag in ["video-vault", "no-transcript"])
     lines = _frontmatter(
         meta,
         saved_at,
-        {"tags": "[video-vault, no-transcript]", "status": "no-transcript"},
+        {"tags": f"[{tags}]", "status": "no-transcript"},
     )
     lines += [
         "",
