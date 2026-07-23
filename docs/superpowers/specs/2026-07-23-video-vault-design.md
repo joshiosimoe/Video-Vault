@@ -273,7 +273,11 @@ Bedrock pricing on AWS is partner-operated and set by AWS; verify against the AW
 ```
 video-vault/
 ├── README.md                    # architecture diagram, setup guide, sample note
-├── template.yaml                # AWS SAM
+├── app.py                       # CDK app entrypoint
+├── cdk.json
+├── infra/                       # CDK stack and constructs
+│   ├── pipeline_stack.py
+│   └── constructs/
 ├── src/
 │   ├── poller/
 │   ├── fetch_transcript/
@@ -284,6 +288,8 @@ video-vault/
 ├── scripts/
 │   └── resummarize.py           # re-run summarization over the S3 archive
 ├── tests/
+│   ├── unit/                    # handler logic
+│   └── infra/                   # CDK assertions against synthesized template
 ├── docs/
 │   └── superpowers/specs/
 └── .github/workflows/deploy.yml # OIDC, no static AWS keys
@@ -291,7 +297,11 @@ video-vault/
 
 **`my-video-vault`** (private — the Obsidian vault). Recruiters read the first repo and never see the second.
 
-IaC tool: AWS SAM. Purpose-built for serverless and less boilerplate than CDK for this shape. CDK is the alternative if broader IaC signal matters more than build speed — the architecture is unchanged either way.
+IaC tool: **AWS CDK (Python)**, matching the Lambda runtime for a single-language repo.
+
+Chosen over SAM on portfolio grounds: CDK appears far more often in AWS job requirements, is real typed code rather than YAML templating, and supports **infrastructure unit tests** via `aws-cdk-lib/assertions` — asserting least-privilege IAM, DLQ wiring, and alarm thresholds against the synthesized CloudFormation. SAM has no native equivalent, and an infra test suite is an uncommon and defensible portfolio detail.
+
+Accepted cost: the CDK app is more code than an equivalent SAM template, and `sam local invoke` is a smoother Lambda dev loop. The second is largely recovered — `cdk synth` emits CloudFormation that `sam local invoke -t cdk.out/<stack>.template.json` runs against, so local Lambda testing is preserved.
 
 ## Manual setup prerequisites
 
@@ -309,4 +319,4 @@ These cannot be automated and must be done once before first deploy:
 
 ## Open questions
 
-None blocking. IaC tool choice (SAM vs CDK) is settled as SAM but is a low-cost reversal if preferred otherwise.
+None blocking.
