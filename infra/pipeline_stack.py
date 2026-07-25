@@ -177,14 +177,18 @@ class VideoVaultStack(Stack):
                     sfn.JsonPath.string_at("$.video_id")
                 )
             },
-            update_expression="SET #s = :s, #u = :u ADD #a :one",
+            update_expression="SET #s = :s, #e = :e, #u = :u ADD #a :one",
             expression_attribute_names={
                 "#s": "status",
+                "#e": "error",
                 "#u": "updated_at",
                 "#a": "attempts",
             },
             expression_attribute_values={
                 ":s": tasks.DynamoAttributeValue.from_string("failed"),
+                ":e": tasks.DynamoAttributeValue.from_string(
+                    sfn.JsonPath.json_to_string(sfn.JsonPath.object_at("$.error"))
+                ),
                 ":u": tasks.DynamoAttributeValue.from_string(
                     sfn.JsonPath.string_at("$$.State.EnteredTime")
                 ),

@@ -59,3 +59,15 @@ def test_caught_failures_end_the_execution_as_failed():
     states = _definition(_template())["States"]
     assert states["MarkFailed"]["Next"] == "PipelineFailed"
     assert states["PipelineFailed"]["Type"] == "Fail"
+
+
+def test_mark_failed_records_the_error():
+    """Design spec: MarkFailed 'sets status: failed, records the error, increments
+    attempts'. The DynamoDB update must actually write an error attribute, not just
+    status and attempts."""
+    params = _definition(_template())["States"]["MarkFailed"]["Parameters"]
+    names = params["ExpressionAttributeNames"]
+    values = params["ExpressionAttributeValues"]
+    name_placeholder = next(key for key, value in names.items() if value == "error")
+    value_placeholder = ":" + name_placeholder.lstrip("#")
+    assert value_placeholder in values
