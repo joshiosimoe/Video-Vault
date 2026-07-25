@@ -1,5 +1,7 @@
-from aws_cdk import Duration, RemovalPolicy, Stack
+from aws_cdk import BundlingOptions, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_iam as iam
+from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
@@ -53,3 +55,113 @@ class VideoVaultStack(Stack):
             parameter_name="/video-vault/content-bucket",
             string_value=self.content_bucket.bucket_name,
         )
+
+        playlist_id = self.node.try_get_context("playlist_id") or "REPLACE_ME"
+        repo_owner = self.node.try_get_context("vault_repo_owner") or "REPLACE_ME"
+        repo_name = self.node.try_get_context("vault_repo_name") or "REPLACE_ME"
+        bedrock_region = self.node.try_get_context("bedrock_region") or self.region
+
+        param_prefix = f"arn:aws:ssm:{self.region}:{self.account}:parameter/video-vault"
+
+        code = lambda_.Code.from_asset(
+            "src",
+            bundling=BundlingOptions(
+                image=lambda_.Runtime.PYTHON_3_12.bundling_image,
+                command=[
+                    "bash",
+                    "-c",
+                    "pip install -r requirements.txt -t /asset-output "
+                    "&& mkdir -p /asset-output/src "
+                    "&& cp -au . /asset-output/src",
+                ],
+            ),
+        )
+
+        common_env = {
+            "STATE_TABLE": self.state_table.table_name,
+            "CONTENT_BUCKET": self.content_bucket.bucket_name,
+        }
+
+        def make_function(name: str, handler: str, env: dict, timeout_min: int):
+            fn = lambda_.Function(
+                self,
+                name,
+                runtime=lambda_.Runtime.PYTHON_3_12,
+                handler=handler,
+                code=code,
+                timeout=Duration.minutes(timeout_min),
+                memory_size=512,
+                environment={**common_env, **env},
+            )
+            self.state_table.grant_read_write_data(fn)
+            return fn
+
+        def grant_ssm(fn: lambda_.Function, names: list[str]) -> None:
+            fn.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["ssm:GetParameter"],
+                    resources=[f"{param_prefix}/{n}" for n in names],
+                )
+            )
+
+        self.fn_poller = make_function(
+            "PollerFunction",
+            "src.handlers.poller.handler",
+            {
+                "QUEUE_URL": self.queue.queue_url,
+                "PLAYLIST_ID": playlist_id,
+                "GOOGLE_CLIENT_ID_PARAM": "/video-vault/google-client-id",
+                "GOOGLE_CLIENT_SECRET_PARAM": "/video-vault/google-client-secret",
+                "GOOGLE_REFRESH_TOKEN_PARAM": "/video-vault/google-refresh-token",
+            },
+            timeout_min=5,
+        )
+        self.queue.grant_send_messages(self.fn_poller)
+        grant_ssm(
+            self.fn_poller,
+            ["google-client-id", "google-client-secret", "google-refresh-token"],
+        )
+
+        self.fn_fetch = make_function(
+            "FetchTranscriptFunction",
+            "src.handlers.fetch_transcript.handler",
+            {"TRANSCRIPT_API_KEY_PARAM": "/video-vault/transcript-api-key"},
+            timeout_min=2,
+        )
+        self.content_bucket.grant_read_write(self.fn_fetch)
+        grant_ssm(self.fn_fetch, ["transcript-api-key"])
+
+        self.fn_summarize = make_function(
+            "SummarizeFunction",
+            "src.handlers.summarize.handler",
+            {"BEDROCK_REGION": bedrock_region},
+            timeout_min=10,
+        )
+        self.content_bucket.grant_read(self.fn_summarize)
+        self.fn_summarize.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel"],
+                resources=[
+                    f"arn:aws:bedrock:{bedrock_region}::foundation-model/anthropic.claude-sonnet-5"
+                ],
+            )
+        )
+
+        commit_env = {
+            "GITHUB_TOKEN_PARAM": "/video-vault/github-token",
+            "VAULT_REPO_OWNER": repo_owner,
+            "VAULT_REPO_NAME": repo_name,
+        }
+
+        self.fn_commit = make_function(
+            "RenderCommitFunction", "src.handlers.render_commit.handler", commit_env, 2
+        )
+        grant_ssm(self.fn_commit, ["github-token"])
+        # Writes summaries/{video_id}.json for downstream consumers.
+        self.content_bucket.grant_put(self.fn_commit)
+
+        # The stub handler writes no summary artifact, so it gets no S3 grant.
+        self.fn_stub = make_function(
+            "StubNoteFunction", "src.handlers.render_commit.stub_handler", commit_env, 2
+        )
+        grant_ssm(self.fn_stub, ["github-token"])
