@@ -1,0 +1,61 @@
+import json
+
+import aws_cdk as cdk
+from aws_cdk.assertions import Template
+
+from infra.pipeline_stack import VideoVaultStack
+
+CONTEXT = {
+    "playlist_id": "PL123",
+    "vault_repo_owner": "me",
+    "vault_repo_name": "vault",
+    "bedrock_region": "us-east-1",
+}
+
+
+def _template() -> Template:
+    app = cdk.App(context=CONTEXT)
+    return Template.from_stack(VideoVaultStack(app, "TestStack"))
+
+
+def test_creates_one_standard_state_machine():
+    template = _template()
+    template.resource_count_is("AWS::StepFunctions::StateMachine", 1)
+    machine = next(iter(template.find_resources("AWS::StepFunctions::StateMachine").values()))
+    assert machine["Properties"].get("StateMachineType", "STANDARD") == "STANDARD"
+
+
+def _definition_states(template: Template) -> set[str]:
+    machine = next(iter(template.find_resources("AWS::StepFunctions::StateMachine").values()))
+    body = machine["Properties"]["DefinitionString"]
+    joined = "".join(part for part in body["Fn::Join"][1] if isinstance(part, str))
+    return set(part for part in joined.split('"') if part)
+
+
+def test_definition_includes_all_pipeline_states():
+    states = _definition_states(_template())
+    for name in [
+        "FetchTranscript",
+        "HasTranscript",
+        "Summarize",
+        "RenderAndCommit",
+        "WriteStubNote",
+        "MarkFailed",
+    ]:
+        assert name in states
+
+
+def _definition(template: Template) -> dict:
+    machine = next(iter(template.find_resources("AWS::StepFunctions::StateMachine").values()))
+    parts = machine["Properties"]["DefinitionString"]["Fn::Join"][1]
+    return json.loads(
+        "".join(part if isinstance(part, str) else "ARN_PLACEHOLDER" for part in parts)
+    )
+
+
+def test_caught_failures_end_the_execution_as_failed():
+    """ExecutionsFailed is the spec's primary failure signal, so a caught failure
+    must not end the execution in success: MarkFailed hands off to a Fail state."""
+    states = _definition(_template())["States"]
+    assert states["MarkFailed"]["Next"] == "PipelineFailed"
+    assert states["PipelineFailed"]["Type"] == "Fail"

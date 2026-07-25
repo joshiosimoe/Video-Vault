@@ -5,6 +5,8 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
+from aws_cdk import aws_stepfunctions as sfn
+from aws_cdk import aws_stepfunctions_tasks as tasks
 from constructs import Construct
 
 
@@ -165,3 +167,99 @@ class VideoVaultStack(Stack):
             "StubNoteFunction", "src.handlers.render_commit.stub_handler", commit_env, 2
         )
         grant_ssm(self.fn_stub, ["github-token"])
+
+        mark_failed = tasks.DynamoUpdateItem(
+            self,
+            "MarkFailed",
+            table=self.state_table,
+            key={
+                "video_id": tasks.DynamoAttributeValue.from_string(
+                    sfn.JsonPath.string_at("$.video_id")
+                )
+            },
+            update_expression="SET #s = :s, #u = :u ADD #a :one",
+            expression_attribute_names={
+                "#s": "status",
+                "#u": "updated_at",
+                "#a": "attempts",
+            },
+            expression_attribute_values={
+                ":s": tasks.DynamoAttributeValue.from_string("failed"),
+                ":u": tasks.DynamoAttributeValue.from_string(
+                    sfn.JsonPath.string_at("$$.State.EnteredTime")
+                ),
+                ":one": tasks.DynamoAttributeValue.from_number(1),
+            },
+        )
+
+        # MarkFailed must not end the execution in success: ExecutionsFailed is the
+        # primary failure signal (see the spec's failure-handling table) and Task 19's
+        # PipelineFailures alarm is built on it.
+        mark_failed.next(
+            sfn.Fail(
+                self,
+                "PipelineFailed",
+                error="VideoVaultPipelineFailed",
+                cause="See the DynamoDB status and error fields for this video_id.",
+            )
+        )
+
+        retry_props = {
+            "errors": ["States.ALL"],
+            "interval": Duration.seconds(2),
+            "max_attempts": 3,
+            "backoff_rate": 2.0,
+        }
+
+        fetch = tasks.LambdaInvoke(
+            self,
+            "FetchTranscript",
+            lambda_function=self.fn_fetch,
+            payload_response_only=True,
+        )
+        fetch.add_retry(**retry_props)
+        fetch.add_catch(mark_failed, result_path="$.error")
+
+        summarize = tasks.LambdaInvoke(
+            self,
+            "Summarize",
+            lambda_function=self.fn_summarize,
+            payload_response_only=True,
+        )
+        summarize.add_retry(**retry_props)
+        summarize.add_catch(mark_failed, result_path="$.error")
+
+        commit = tasks.LambdaInvoke(
+            self,
+            "RenderAndCommit",
+            lambda_function=self.fn_commit,
+            payload_response_only=True,
+        )
+        commit.add_retry(**retry_props)
+        commit.add_catch(mark_failed, result_path="$.error")
+
+        stub = tasks.LambdaInvoke(
+            self,
+            "WriteStubNote",
+            lambda_function=self.fn_stub,
+            payload_response_only=True,
+        )
+        stub.add_retry(**retry_props)
+        stub.add_catch(mark_failed, result_path="$.error")
+
+        choice = (
+            sfn.Choice(self, "HasTranscript")
+            .when(
+                sfn.Condition.boolean_equals("$.has_transcript", True),
+                summarize.next(commit),
+            )
+            .otherwise(stub)
+        )
+
+        self.state_machine = sfn.StateMachine(
+            self,
+            "VideoPipeline",
+            definition_body=sfn.DefinitionBody.from_chainable(fetch.next(choice)),
+            state_machine_type=sfn.StateMachineType.STANDARD,
+            timeout=Duration.minutes(30),
+        )
