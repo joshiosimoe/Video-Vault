@@ -1,7 +1,10 @@
 from aws_cdk import BundlingOptions, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_events as events
+from aws_cdk import aws_events_targets as targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_pipes as pipes
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
@@ -266,4 +269,40 @@ class VideoVaultStack(Stack):
             definition_body=sfn.DefinitionBody.from_chainable(fetch.next(choice)),
             state_machine_type=sfn.StateMachineType.STANDARD,
             timeout=Duration.minutes(30),
+        )
+
+        events.Rule(
+            self,
+            "PollSchedule",
+            schedule=events.Schedule.rate(Duration.minutes(15)),
+            targets=[targets.LambdaFunction(self.fn_poller)],
+        )
+
+        pipe_role = iam.Role(
+            self,
+            "PipeRole",
+            assumed_by=iam.ServicePrincipal("pipes.amazonaws.com"),
+        )
+        self.queue.grant_consume_messages(pipe_role)
+        self.state_machine.grant_start_execution(pipe_role)
+
+        pipes.CfnPipe(
+            self,
+            "QueueToPipeline",
+            role_arn=pipe_role.role_arn,
+            source=self.queue.queue_arn,
+            target=self.state_machine.state_machine_arn,
+            source_parameters=pipes.CfnPipe.PipeSourceParametersProperty(
+                sqs_queue_parameters=pipes.CfnPipe.PipeSourceSqsQueueParametersProperty(
+                    batch_size=1
+                )
+            ),
+            target_parameters=pipes.CfnPipe.PipeTargetParametersProperty(
+                step_function_state_machine_parameters=(
+                    pipes.CfnPipe.PipeTargetStateMachineParametersProperty(
+                        invocation_type="FIRE_AND_FORGET"
+                    )
+                ),
+                input_template='{"video_id": <$.body.video_id>}',
+            ),
         )
