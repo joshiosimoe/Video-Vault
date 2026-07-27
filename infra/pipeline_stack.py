@@ -1,4 +1,5 @@
 from aws_cdk import BundlingOptions, Duration, RemovalPolicy, Stack
+from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as targets
@@ -304,5 +305,89 @@ class VideoVaultStack(Stack):
                     )
                 ),
                 input_template='{"video_id": <$.body.video_id>}',
+            ),
+        )
+
+        cloudwatch.Alarm(
+            self,
+            "PipelineFailures",
+            metric=self.state_machine.metric_failed(period=Duration.minutes(15)),
+            threshold=1,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            alarm_description="A Video Vault pipeline execution failed.",
+        )
+
+        cloudwatch.Alarm(
+            self,
+            "DlqNotEmpty",
+            metric=self.dlq.metric_approximate_number_of_messages_visible(
+                period=Duration.minutes(15)
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            alarm_description="Pipes could not start an execution for a queued video.",
+        )
+
+        cloudwatch.Alarm(
+            self,
+            "PollerErrors",
+            metric=self.fn_poller.metric_errors(period=Duration.minutes(30)),
+            threshold=1,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            alarm_description=(
+                "The poller failed. Most likely cause: the Google OAuth refresh token "
+                "expired because the consent screen is in Testing status."
+            ),
+        )
+
+        # CloudWatch caps an alarm's Period * EvaluationPeriods at 604,800s (7 days),
+        # so the alarm cannot watch a 30-day window. The dashboard widget can.
+        transcript_calls_weekly = cloudwatch.Metric(
+            namespace="VideoVault",
+            metric_name="TranscriptCalls",
+            statistic="Sum",
+            period=Duration.days(7),
+        )
+
+        transcript_calls_monthly = cloudwatch.Metric(
+            namespace="VideoVault",
+            metric_name="TranscriptCalls",
+            statistic="Sum",
+            period=Duration.days(30),
+        )
+
+        cloudwatch.Alarm(
+            self,
+            "TranscriptBudget",
+            metric=transcript_calls_weekly,
+            threshold=20,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            alarm_description=(
+                "20 transcript API calls in the last 7 days, which is the weekly "
+                "run rate that exhausts the roughly 100-per-month free tier. "
+                "Switch TRANSCRIPT_PROVIDER to the proxy provider or upgrade the "
+                "plan before it runs out."
+            ),
+        )
+
+        dashboard = cloudwatch.Dashboard(self, "VideoVaultDashboard")
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Pipeline executions",
+                left=[
+                    self.state_machine.metric_succeeded(),
+                    self.state_machine.metric_failed(),
+                ],
+            ),
+            cloudwatch.SingleValueWidget(
+                title="Transcript calls (30d)", metrics=[transcript_calls_monthly]
+            ),
+            cloudwatch.GraphWidget(
+                title="Poller invocations and errors",
+                left=[self.fn_poller.metric_invocations(), self.fn_poller.metric_errors()],
             ),
         )
