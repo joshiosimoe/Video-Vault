@@ -6,7 +6,7 @@ from moto import mock_aws
 
 from scripts.resummarize import resummarize
 from src.shared.models import Summary, Transcript, TranscriptSegment, VideoMeta
-from src.shared.state_store import StateStore
+from src.shared.state_store import StateStore, Status
 
 BUCKET = "vv-content"
 TABLE = "vv-state"
@@ -30,6 +30,11 @@ class FakeCommitter:
 
     def commit_note(self, path, content, message):
         self.commits.append((path, content, message))
+
+
+class ExplodingCommitter:
+    def commit_note(self, path, content, message):
+        raise RuntimeError("github is down")
 
 
 @pytest.fixture
@@ -100,3 +105,20 @@ def test_resummarize_skips_videos_without_archived_transcript(aws):
 
     assert paths == []
     assert committer.commits == []
+
+
+def test_writes_artifact_before_committing(aws):
+    with pytest.raises(RuntimeError):
+        resummarize(
+            video_ids=["abc123"],
+            s3_client=aws,
+            store=StateStore(TABLE),
+            summarizer=FakeSummarizer(),
+            committer=ExplodingCommitter(),
+            bucket=BUCKET,
+        )
+
+    # the artifact survived the failed commit
+    aws.get_object(Bucket=BUCKET, Key="summaries/abc123.json")
+    # status was NOT advanced past the failure
+    assert StateStore(TABLE).get("abc123")["status"] != Status.DONE
