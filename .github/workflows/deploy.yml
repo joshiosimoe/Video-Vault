@@ -27,4 +27,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Deploy
-        run: npx aws-cdk@2 deploy --require-approval never
+        run: |
+          npx aws-cdk@2 deploy --require-approval never \
+            -c playlist_id=${{ vars.PLAYLIST_ID }} \
+            -c vault_repo_owner=${{ vars.VAULT_REPO_OWNER }} \
+            -c vault_repo_name=${{ vars.VAULT_REPO_NAME }} \
+            -c bedrock_region=${{ vars.BEDROCK_REGION }}

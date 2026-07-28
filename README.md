@@ -25,19 +25,32 @@ GitHub repo that Obsidian syncs.
 title: "How Kubernetes Scheduling Actually Works"
 channel: "Some Channel"
 url: https://www.youtube.com/watch?v=VIDEO_ID
+video_id: "VIDEO_ID"
 duration: "1:04:22"
-tags: [video-vault, kubernetes, scheduling]
+published: 2026-06-02
+saved: 2026-06-03
+summarized: 2026-06-03
+tags: ["video-vault", "kubernetes", "scheduling"]
 status: summarized
 ---
 
-> **Verdict:** Worth watching 18:40–31:00 for the custom scheduler
-> walkthrough; the rest is standard docs material.
+# How Kubernetes Scheduling Actually Works
+
+> **Verdict:** Worth watching 18:40–31:00 for the custom scheduler walkthrough; the rest is standard docs material.
 
 ## TL;DR
-...
+
+Walks through the default scheduler's predicate/priority pipeline, then live-codes a minimal custom scheduler to show how pod placement decisions actually get made.
+
+## Key takeaways
+
+- The default scheduler filters nodes with predicates, then ranks survivors with priority functions.
+- Custom schedulers only need to watch unscheduled pods and write a binding — no fork required.
+- Resource requests, not limits, drive scheduling decisions; limits only matter at the kubelet.
 
 ## Sections
-- [18:40](https://www.youtube.com/watch?v=VIDEO_ID&t=1120) — Writing a custom scheduler
+
+- [18:40](https://www.youtube.com/watch?v=VIDEO_ID&t=1120) — Writing a custom scheduler: Live-codes a scheduler plugin using the extender API.
 ```
 
 ## Stack
@@ -91,9 +104,12 @@ OIDC, with no long-lived AWS credentials stored in the repo. To wire it up:
    scoping `token.actions.githubusercontent.com:sub` to this repository (e.g.
    `repo:<owner>/<repo>:ref:refs/heads/main`), and permissions to deploy the stack.
 3. In the repo's Settings → Secrets and variables → Actions → Variables, add
-   `AWS_DEPLOY_ROLE_ARN` (the role's ARN) and `AWS_REGION` (the deploy region).
+   `AWS_DEPLOY_ROLE_ARN` (the role's ARN), `AWS_REGION` (the deploy region), and
+   the four stack context values the CDK app needs: `PLAYLIST_ID`,
+   `VAULT_REPO_OWNER`, `VAULT_REPO_NAME`, and `BEDROCK_REGION`.
 
-Without both variables set, the deploy workflow fails at the credentials step.
+Without all six variables set, the deploy workflow fails at the credentials step
+or deploys the stack with unusable placeholder context.
 
 ## License
 
