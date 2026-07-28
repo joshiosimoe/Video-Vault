@@ -24,8 +24,12 @@ def _load_transcript(s3_client, bucket: str, video_id: str) -> Transcript | None
         body = s3_client.get_object(Bucket=bucket, Key=f"transcripts/{video_id}.json")[
             "Body"
         ].read()
-    except ClientError:
-        return None
+    except ClientError as exc:
+        # GET returns a modelled error document, so a genuine miss is NoSuchKey.
+        # Anything else (AccessDenied, SlowDown) is a real problem, not an absence.
+        if exc.response["Error"]["Code"] == "NoSuchKey":
+            return None
+        raise
     return Transcript.from_dict(json.loads(body))
 
 

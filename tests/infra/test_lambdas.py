@@ -37,6 +37,12 @@ def test_summarize_function_can_invoke_bedrock():
                                 {
                                     "Action": "bedrock:InvokeModel",
                                     "Effect": "Allow",
+                                    # Least privilege is the point of this test:
+                                    # the grant must be the single model ARN, not "*".
+                                    "Resource": (
+                                        "arn:aws:bedrock:us-east-1::"
+                                        "foundation-model/anthropic.claude-sonnet-5"
+                                    ),
                                 }
                             )
                         ]

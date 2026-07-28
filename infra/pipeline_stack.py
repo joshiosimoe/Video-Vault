@@ -269,7 +269,11 @@ class VideoVaultStack(Stack):
             "VideoPipeline",
             definition_body=sfn.DefinitionBody.from_chainable(fetch.next(choice)),
             state_machine_type=sfn.StateMachineType.STANDARD,
-            timeout=Duration.minutes(30),
+            # Must exceed the worst-case retry budget across all states (Summarize
+            # alone is 10 min x 4 invocations). On States.Timeout the state-level
+            # Catch handlers do NOT run, so MarkFailed never fires and the row is
+            # stranded mid-pipeline. Retries must exhaust into MarkFailed instead.
+            timeout=Duration.minutes(90),
         )
 
         events.Rule(
@@ -316,6 +320,22 @@ class VideoVaultStack(Stack):
             evaluation_periods=1,
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
             alarm_description="A Video Vault pipeline execution failed.",
+        )
+
+        # ExecutionsTimedOut is a distinct metric from ExecutionsFailed; metric_failed()
+        # does not cover it, so a timed-out execution would otherwise be silent.
+        cloudwatch.Alarm(
+            self,
+            "PipelineTimeouts",
+            metric=self.state_machine.metric_timed_out(period=Duration.minutes(15)),
+            threshold=1,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            alarm_description=(
+                "A Video Vault execution hit the state machine timeout. Catch handlers "
+                "do not run on States.Timeout, so the DynamoDB row is stranded mid-pipeline "
+                "and needs a manual requeue."
+            ),
         )
 
         cloudwatch.Alarm(
@@ -369,8 +389,8 @@ class VideoVaultStack(Stack):
             alarm_description=(
                 "20 transcript API calls in the last 7 days, which is the weekly "
                 "run rate that exhausts the roughly 100-per-month free tier. "
-                "Switch TRANSCRIPT_PROVIDER to the proxy provider or upgrade the "
-                "plan before it runs out."
+                "Upgrade the transcript plan, or implement a proxy provider behind "
+                "the existing TranscriptProvider seam, before it runs out."
             ),
         )
 

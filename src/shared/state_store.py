@@ -77,6 +77,20 @@ class StateStore:
         )
 
     def mark_failed(self, video_id: str, error: str) -> None:
+        """Mark a video failed. Not the production failure path.
+
+        In production the Step Functions ``MarkFailed`` state owns this write; no
+        handler calls this method. It is retained for local and manual use (and by
+        the poller tests, which need a ``failed`` row to sweep).
+
+        The two writers produce different ``updated_at`` formats: this one writes
+        ``datetime.now(UTC).isoformat()`` (``...+00:00``), while the ASL writes
+        ``$$.State.EnteredTime``, which is RFC 3339 ``Z`` form (``...Z``). The
+        poller's stale-cutoff comparison is a lexicographic DynamoDB string
+        compare, and it stays correct only because both formats share the same
+        fixed-width second-precision ``YYYY-MM-DDTHH:MM:SS`` prefix. Do not change
+        either writer to a format that breaks that prefix.
+        """
         self._table.update_item(
             Key={"video_id": video_id},
             UpdateExpression=("SET #s = :s, #e = :e, #u = :u ADD #a :one"),

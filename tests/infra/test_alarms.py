@@ -23,8 +23,8 @@ def _logical_id(template: Template, cfn_type: str, prefix: str) -> str:
     raise AssertionError(f"no {cfn_type} with logical id starting {prefix}")
 
 
-def test_creates_four_alarms():
-    _template().resource_count_is("AWS::CloudWatch::Alarm", 4)
+def test_creates_five_alarms():
+    _template().resource_count_is("AWS::CloudWatch::Alarm", 5)
 
 
 def test_alarms_on_transcript_budget():
@@ -51,6 +51,21 @@ def test_alarms_on_failed_executions():
         "AWS::CloudWatch::Alarm",
         {
             "MetricName": "ExecutionsFailed",
+            "Namespace": "AWS/States",
+            "Threshold": 1,
+            "EvaluationPeriods": 1,
+            "TreatMissingData": "notBreaching",
+        },
+    )
+
+
+def test_alarms_on_timed_out_executions():
+    # ExecutionsTimedOut is a separate metric from ExecutionsFailed; the
+    # PipelineFailures alarm does not cover a States.Timeout.
+    _template().has_resource_properties(
+        "AWS::CloudWatch::Alarm",
+        {
+            "MetricName": "ExecutionsTimedOut",
             "Namespace": "AWS/States",
             "Threshold": 1,
             "EvaluationPeriods": 1,

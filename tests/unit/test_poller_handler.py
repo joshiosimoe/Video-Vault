@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 import boto3
 import pytest
@@ -6,7 +7,7 @@ from moto import mock_aws
 
 from src.handlers import poller
 from src.shared.models import VideoMeta
-from src.shared.state_store import StateStore
+from src.shared.state_store import StateStore, Status
 
 TABLE = "vv-state"
 QUEUE = "vv-queue"
@@ -95,6 +96,29 @@ def test_does_not_requeue_failed_past_attempt_limit(aws, monkeypatch):
         store.mark_failed("v1", "boom")
     monkeypatch.setattr(poller, "_build_client", lambda: FakeYouTube([], []))
     monkeypatch.setattr(poller, "_stale_cutoff", lambda: "2999-01-01T00:00:00Z")
+
+    assert poller.handler({}, None)["requeued"] == 0
+    assert _messages(aws) == []
+
+
+def test_does_not_requeue_a_row_failed_moments_ago_by_step_functions(aws, monkeypatch):
+    # Production writes `failed` rows from the Step Functions MarkFailed state, whose
+    # $$.State.EnteredTime is RFC 3339 "Z" form -- not the "+00:00" form
+    # state_store._now() produces. Every other requeue test monkeypatches
+    # _stale_cutoff to 2999, so the real one is only exercised here: a row failed
+    # just now must fall on the fresh side of the lexicographic cutoff.
+    StateStore(TABLE).try_insert(META_1)
+    boto3.resource("dynamodb", region_name="us-east-1").Table(TABLE).update_item(
+        Key={"video_id": "v1"},
+        UpdateExpression="SET #s = :s, updated_at = :u, attempts = :a",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":s": Status.FAILED,
+            ":u": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            ":a": 1,
+        },
+    )
+    monkeypatch.setattr(poller, "_build_client", lambda: FakeYouTube([], []))
 
     assert poller.handler({}, None)["requeued"] == 0
     assert _messages(aws) == []

@@ -76,6 +76,16 @@ def test_fetch_raises_on_async_job_response():
 
 
 @respx.mock
+def test_fetch_raises_on_unexpected_success_status():
+    # A new <400 status must not fall through to _to_transcript, whose .get()
+    # defaults would yield a zero-segment Transcript instead of an error.
+    respx.get(f"{BASE}/transcript").mock(return_value=httpx.Response(203, json={"lang": "en"}))
+    provider = ApiTranscriptProvider(api_key="k", base_url=BASE)
+    with pytest.raises(TranscriptUnavailable, match="203"):
+        provider.fetch("abc123")
+
+
+@respx.mock
 def test_fetch_raises_on_rate_limit():
     respx.get(f"{BASE}/transcript").mock(return_value=httpx.Response(429))
     provider = ApiTranscriptProvider(api_key="k", base_url=BASE)

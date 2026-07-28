@@ -2,6 +2,7 @@ import json
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from src.handlers import fetch_transcript
@@ -85,6 +86,25 @@ def test_reuses_existing_s3_object_without_calling_provider(aws, monkeypatch):
 
     result = fetch_transcript.handler({"video_id": "abc123"}, None)
     assert result["has_transcript"] is True
+
+
+def test_non_404_head_object_error_propagates(aws, monkeypatch):
+    # A permissions or throttling failure must not be read as "object absent":
+    # that silently re-fetches and re-bills a paid transcript credit.
+    class DeniedS3:
+        def head_object(self, **kwargs):
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "denied"}}, "HeadObject"
+            )
+
+    def explode():
+        raise AssertionError("provider must not be called when S3 access fails")
+
+    monkeypatch.setattr(fetch_transcript, "_s3", lambda: DeniedS3())
+    monkeypatch.setattr(fetch_transcript, "_build_provider", explode)
+
+    with pytest.raises(ClientError):
+        fetch_transcript.handler({"video_id": "abc123"}, None)
 
 
 def _emitted_metrics(captured: str) -> list[dict]:

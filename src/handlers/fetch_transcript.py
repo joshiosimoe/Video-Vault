@@ -24,11 +24,19 @@ def _transcript_key(video_id: str) -> str:
     return f"transcripts/{video_id}.json"
 
 
+# HEAD carries no response body, so botocore surfaces the bare status code rather
+# than the modelled NoSuchKey. Accept both; anything else (AccessDenied, throttling)
+# must propagate -- swallowing it here silently re-fetches and re-bills a transcript.
+_NOT_FOUND_CODES = {"404", "NoSuchKey"}
+
+
 def _existing_object(bucket: str, key: str) -> bool:
     try:
         _s3().head_object(Bucket=bucket, Key=key)
-    except ClientError:
-        return False
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in _NOT_FOUND_CODES:
+            return False
+        raise
     return True
 
 

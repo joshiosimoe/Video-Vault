@@ -49,6 +49,14 @@ class ApiTranscriptProvider(TranscriptProvider):
         if response.status_code >= 400:
             raise TranscriptUnavailable(f"provider returned {response.status_code} for {video_id}")
 
+        # Anything else under 400 would fall through to _to_transcript, whose .get()
+        # defaults would turn an unrecognised body into a zero-segment Transcript --
+        # exactly the silent failure the 206 case caused. Fail loudly instead.
+        if response.status_code != 200:
+            raise TranscriptUnavailable(
+                f"provider returned unexpected status {response.status_code} for {video_id}"
+            )
+
         return self._to_transcript(video_id, response.json())
 
     @staticmethod
