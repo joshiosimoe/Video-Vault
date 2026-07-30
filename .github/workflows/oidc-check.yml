@@ -21,6 +21,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Print the OIDC subject claim
+        # Prints only `sub` and `aud` -- never the token itself. The trust policy
+        # pins `sub` exactly, so seeing the real value beats guessing at it.
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          PAYLOAD=$(printf '%s' "$TOKEN" | cut -d. -f2)
+          case $(( ${#PAYLOAD} % 4 )) in 2) PAYLOAD="$PAYLOAD==";; 3) PAYLOAD="$PAYLOAD=";; esac
+          printf '%s' "$PAYLOAD" | tr '_-' '/+' | base64 -d 2>/dev/null \
+            | jq '{sub, aud, repository, ref, event_name, workflow_ref}'
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
