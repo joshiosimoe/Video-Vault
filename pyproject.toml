@@ -11,6 +11,10 @@ addopts = "-v"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# ruff 0.16 began formatting Python inside markdown fences. The specs and plans
+# under docs/ are a historical record of decisions; a formatter rewriting their
+# code samples is diff noise on documents meant to stay stable.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

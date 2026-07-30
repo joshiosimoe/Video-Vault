@@ -5,5 +5,7 @@ respx>=0.21.0
 httpx>=0.27.0
 anthropic[bedrock]>=0.40.0
 boto3>=1.34.0
-ruff>=0.6.0
+# Pinned exactly: an unpinned formatter means CI can go red on a tree that
+# passed locally, with no code change. 0.6.0..0.16.0 drift did exactly that.
+ruff==0.16.0
 PyYAML>=6.0
