@@ -1,0 +1,35 @@
+name: OIDC Check
+
+# Diagnostic only: proves the GitHub OIDC trust policy accepts this repository
+# before a real deploy depends on it. Assumes the deploy role and exits without
+# touching CloudFormation, so a failure here is unambiguously a trust-policy
+# problem rather than a CDK one.
+#
+# workflow_dispatch on the default branch produces the same `sub` claim as the
+# workflow_run event deploy.yml uses (`repo:<owner>/<repo>:ref:refs/heads/main`),
+# so this validates the exact condition the trust policy pins.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Confirm the assumed identity
+        run: aws sts get-caller-identity
+      - name: Confirm the CDK bootstrap roles are assumable
+        run: |
+          aws sts assume-role \
+            --role-arn "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/cdk-hnb659fds-deploy-role-$(aws sts get-caller-identity --query Account --output text)-${{ vars.AWS_REGION }}" \
+            --role-session-name oidc-check \
+            --query 'AssumedRoleUser.Arn' --output text
