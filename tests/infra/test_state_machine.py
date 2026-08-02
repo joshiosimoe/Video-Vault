@@ -25,6 +25,27 @@ def test_creates_one_standard_state_machine():
     assert machine["Properties"].get("StateMachineType", "STANDARD") == "STANDARD"
 
 
+def _definition_text(template: Template) -> str:
+    machine = next(iter(template.find_resources("AWS::StepFunctions::StateMachine").values()))
+    body = machine["Properties"]["DefinitionString"]
+    return "".join(part for part in body["Fn::Join"][1] if isinstance(part, str))
+
+
+def test_definition_unwraps_the_pipes_batch_array():
+    # EventBridge Pipes always delivers the target payload as an ARRAY of
+    # transformed events -- batch_size=1 yields a single-element array, not a bare
+    # object. Every handler expects an object, so without unwrapping the first
+    # Lambda dies with "list indices must be integers or slices, not str", and the
+    # MarkFailed catch then fails too: its result_path "$.error" is applied to the
+    # state's RAW input, which is still the array, giving
+    # States.ReferencePathConflict. Normalizing must therefore happen BEFORE any
+    # state that carries a catch, which is why it is its own first state rather
+    # than an InputPath on FetchTranscript.
+    text = _definition_text(_template()).replace(" ", "")
+    assert '"StartAt":"NormalizeBatch"' in text
+    assert '"InputPath":"$[0]"' in text
+
+
 def _definition_states(template: Template) -> set[str]:
     machine = next(iter(template.find_resources("AWS::StepFunctions::StateMachine").values()))
     body = machine["Properties"]["DefinitionString"]

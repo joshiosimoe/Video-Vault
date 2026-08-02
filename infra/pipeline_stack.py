@@ -279,10 +279,22 @@ class VideoVaultStack(Stack):
             .otherwise(stub)
         )
 
+        # EventBridge Pipes always delivers the target payload as an ARRAY of
+        # transformed events. batch_size=1 gives a single-element array, NOT a bare
+        # object, so the state machine is entered with [{"video_id": "..."}] while
+        # every handler expects {"video_id": "..."}.
+        #
+        # This must be its own first state rather than an InputPath on
+        # FetchTranscript: a Catch's result_path is applied to the state's RAW
+        # input, so with the array still in place MarkFailed fails too, with
+        # States.ReferencePathConflict -- turning a recoverable error into a
+        # stranded row.
+        normalize = sfn.Pass(self, "NormalizeBatch", input_path="$[0]")
+
         self.state_machine = sfn.StateMachine(
             self,
             "VideoPipeline",
-            definition_body=sfn.DefinitionBody.from_chainable(fetch.next(choice)),
+            definition_body=sfn.DefinitionBody.from_chainable(normalize.next(fetch.next(choice))),
             state_machine_type=sfn.StateMachineType.STANDARD,
             # Must exceed the worst-case retry budget across all states (Summarize
             # alone is 10 min x 4 invocations). On States.Timeout the state-level
