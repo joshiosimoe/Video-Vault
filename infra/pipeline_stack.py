@@ -144,11 +144,16 @@ class VideoVaultStack(Stack):
             timeout_min=10,
         )
         self.content_bucket.grant_read(self.fn_summarize)
+        # The summarizer uses AnthropicBedrockMantle (the Messages-API endpoint), which
+        # authorizes against `bedrock-mantle`, a separate IAM service from classic
+        # `bedrock`. Granting bedrock:InvokeModel on a foundation-model ARN synthesizes
+        # and deploys cleanly, then fails at runtime with AccessDenied on the first
+        # video -- the Mantle call needs CreateInference on the account's project.
         self.fn_summarize.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["bedrock:InvokeModel"],
+                actions=["bedrock-mantle:CreateInference"],
                 resources=[
-                    f"arn:aws:bedrock:{bedrock_region}::foundation-model/anthropic.claude-sonnet-5"
+                    f"arn:aws:bedrock-mantle:{bedrock_region}:{self.account}:project/default"
                 ],
             )
         )

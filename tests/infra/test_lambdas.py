@@ -26,6 +26,12 @@ def test_all_functions_use_python_312():
 
 
 def test_summarize_function_can_invoke_bedrock():
+    # The summarizer talks to Bedrock through AnthropicBedrockMantle, which is the
+    # Messages-API endpoint -- a different IAM service from classic InvokeModel.
+    # It authorizes `bedrock-mantle:CreateInference` against the account's Mantle
+    # project, not `bedrock:InvokeModel` against a foundation-model ARN. Granting
+    # the classic action deploys and synthesizes cleanly, then fails at runtime
+    # with AccessDenied on the first real video.
     _template().has_resource_properties(
         "AWS::IAM::Policy",
         {
@@ -35,14 +41,20 @@ def test_summarize_function_can_invoke_bedrock():
                         [
                             Match.object_like(
                                 {
-                                    "Action": "bedrock:InvokeModel",
+                                    "Action": "bedrock-mantle:CreateInference",
                                     "Effect": "Allow",
                                     # Least privilege is the point of this test:
-                                    # the grant must be the single model ARN, not "*".
-                                    "Resource": (
-                                        "arn:aws:bedrock:us-east-1::"
-                                        "foundation-model/anthropic.claude-sonnet-5"
-                                    ),
+                                    # the grant must be the single project ARN, not "*".
+                                    "Resource": {
+                                        "Fn::Join": [
+                                            "",
+                                            [
+                                                "arn:aws:bedrock-mantle:us-east-1:",
+                                                {"Ref": "AWS::AccountId"},
+                                                ":project/default",
+                                            ],
+                                        ]
+                                    },
                                 }
                             )
                         ]
