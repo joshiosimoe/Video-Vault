@@ -42,4 +42,5 @@ jobs:
             -c playlist_id=${{ vars.PLAYLIST_ID }} \
             -c vault_repo_owner=${{ vars.VAULT_REPO_OWNER }} \
             -c vault_repo_name=${{ vars.VAULT_REPO_NAME }} \
-            -c bedrock_region=${{ vars.BEDROCK_REGION }}
+            -c bedrock_region=${{ vars.BEDROCK_REGION }} \
+            -c bedrock_model_id=${{ vars.BEDROCK_MODEL_ID }}

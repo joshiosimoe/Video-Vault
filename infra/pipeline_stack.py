@@ -66,6 +66,9 @@ class VideoVaultStack(Stack):
         repo_owner = self.node.try_get_context("vault_repo_owner") or "REPLACE_ME"
         repo_name = self.node.try_get_context("vault_repo_name") or "REPLACE_ME"
         bedrock_region = self.node.try_get_context("bedrock_region") or self.region
+        bedrock_model_id = (
+            self.node.try_get_context("bedrock_model_id") or "us.anthropic.claude-sonnet-4-6"
+        )
 
         param_prefix = f"arn:aws:ssm:{self.region}:{self.account}:parameter/video-vault"
 
@@ -140,22 +143,29 @@ class VideoVaultStack(Stack):
         self.fn_summarize = make_function(
             "SummarizeFunction",
             "src.handlers.summarize.handler",
-            {"BEDROCK_REGION": bedrock_region},
+            {"BEDROCK_REGION": bedrock_region, "BEDROCK_MODEL_ID": bedrock_model_id},
             timeout_min=10,
         )
         self.content_bucket.grant_read(self.fn_summarize)
-        # The summarizer uses AnthropicBedrockMantle (the Messages-API endpoint), which
-        # authorizes against `bedrock-mantle`, a separate IAM service from classic
-        # `bedrock`. Granting bedrock:InvokeModel on a foundation-model ARN synthesizes
-        # and deploys cleanly, then fails at runtime with AccessDenied on the first
-        # video -- the Mantle call needs CreateInference on the account's project.
-        self.fn_summarize.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["bedrock-mantle:CreateInference"],
-                resources=[
-                    f"arn:aws:bedrock-mantle:{bedrock_region}:{self.account}:project/default"
-                ],
+
+        # A `us.`-prefixed model ID is a cross-region inference profile: Bedrock may
+        # route the request to any member region, and the caller needs InvokeModel on
+        # the underlying foundation model in each of them, not just on the profile.
+        # Granting the profile alone passes in one region and fails intermittently
+        # once Bedrock routes elsewhere.
+        _CROSS_REGION_MEMBERS = ("us-east-1", "us-east-2", "us-west-2")
+        base_model_id = bedrock_model_id.removeprefix("us.")
+        model_resources = [
+            f"arn:aws:bedrock:{region}::foundation-model/{base_model_id}"
+            for region in _CROSS_REGION_MEMBERS
+        ]
+        if bedrock_model_id.startswith("us."):
+            model_resources.append(
+                f"arn:aws:bedrock:{bedrock_region}:{self.account}"
+                f":inference-profile/{bedrock_model_id}"
             )
+        self.fn_summarize.add_to_role_policy(
+            iam.PolicyStatement(actions=["bedrock:InvokeModel"], resources=model_resources)
         )
 
         commit_env = {

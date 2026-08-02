@@ -26,12 +26,12 @@ def test_all_functions_use_python_312():
 
 
 def test_summarize_function_can_invoke_bedrock():
-    # The summarizer talks to Bedrock through AnthropicBedrockMantle, which is the
-    # Messages-API endpoint -- a different IAM service from classic InvokeModel.
-    # It authorizes `bedrock-mantle:CreateInference` against the account's Mantle
-    # project, not `bedrock:InvokeModel` against a foundation-model ARN. Granting
-    # the classic action deploys and synthesizes cleanly, then fails at runtime
-    # with AccessDenied on the first real video.
+    # The summarizer uses the classic AnthropicBedrock client, so the grant is
+    # `bedrock:InvokeModel`. The default model is served through a cross-region
+    # inference profile (the `us.` prefix), which needs BOTH the profile ARN and
+    # the underlying foundation-model ARN in every region the profile can route
+    # to -- granting only the profile fails at runtime when Bedrock routes the
+    # request to a sibling region.
     _template().has_resource_properties(
         "AWS::IAM::Policy",
         {
@@ -41,20 +41,20 @@ def test_summarize_function_can_invoke_bedrock():
                         [
                             Match.object_like(
                                 {
-                                    "Action": "bedrock-mantle:CreateInference",
+                                    "Action": "bedrock:InvokeModel",
                                     "Effect": "Allow",
                                     # Least privilege is the point of this test:
-                                    # the grant must be the single project ARN, not "*".
-                                    "Resource": {
-                                        "Fn::Join": [
-                                            "",
-                                            [
-                                                "arn:aws:bedrock-mantle:us-east-1:",
-                                                {"Ref": "AWS::AccountId"},
-                                                ":project/default",
-                                            ],
+                                    # named ARNs only, never "*".
+                                    "Resource": Match.array_with(
+                                        [
+                                            "arn:aws:bedrock:us-east-1::"
+                                            "foundation-model/anthropic.claude-sonnet-4-6",
+                                            "arn:aws:bedrock:us-east-2::"
+                                            "foundation-model/anthropic.claude-sonnet-4-6",
+                                            "arn:aws:bedrock:us-west-2::"
+                                            "foundation-model/anthropic.claude-sonnet-4-6",
                                         ]
-                                    },
+                                    ),
                                 }
                             )
                         ]
@@ -63,6 +63,21 @@ def test_summarize_function_can_invoke_bedrock():
             )
         },
     )
+
+
+def test_summarize_function_receives_the_model_id_env_var():
+    # The model is configuration, so the Lambda must actually receive it --
+    # otherwise the code silently falls back to its default and the repo
+    # variable does nothing.
+    template = _template()
+    summarize = [
+        fn
+        for logical_id, fn in template.find_resources("AWS::Lambda::Function").items()
+        if logical_id.startswith("SummarizeFunction")
+    ]
+    assert len(summarize) == 1
+    env = summarize[0]["Properties"]["Environment"]["Variables"]
+    assert env["BEDROCK_MODEL_ID"] == "us.anthropic.claude-sonnet-4-6"
 
 
 def test_functions_receive_state_table_env_var():

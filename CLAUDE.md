@@ -34,10 +34,31 @@ suggestions were already considered and ruled out for concrete reasons.
 
 ## Non-obvious facts that will bite you
 
-- **Bedrock model ID is `anthropic.claude-sonnet-5`** — with the `anthropic.`
-  prefix, no date suffix. Requests must set `thinking={"type": "disabled"}` and
-  must NOT set `temperature`, `top_p`, or `top_k`; Sonnet 5 returns 400 on
-  non-default sampling parameters.
+- **The model is configuration, not a constant.** `BEDROCK_MODEL_ID` (repo
+  variable → CDK context → Lambda env) currently defaults to
+  `us.anthropic.claude-sonnet-4-6`. Requests must set
+  `thinking={"type": "disabled"}` and must NOT set `temperature`, `top_p`, or
+  `top_k` — these models return 400 on non-default sampling parameters.
+- **This account is not entitled to Sonnet 5, despite AWS saying it is.**
+  `get-foundation-model-availability` reports `AUTHORIZED` / `AVAILABLE` on all
+  four fields while the inference endpoint returns *"anthropic.claude-sonnet-5 is
+  not available for this account"* — verified for 2.5+ hours after accepting the
+  model agreement, on both the classic and Mantle endpoints. Sonnet 4.6 works on
+  the same account and credentials. Switching back is a `BEDROCK_MODEL_ID` change
+  and a redeploy; do not change code for it.
+- **Use the classic `AnthropicBedrock` client, not `AnthropicBedrockMantle`.**
+  Mantle serves *only* Sonnet 5 (it 404s on 4.6) and is not served in `us-east-2`
+  at all. Classic serves both models, which is why the swap above is config-only.
+  Note the two clients need different IAM: classic wants `bedrock:InvokeModel`,
+  Mantle wants `bedrock-mantle:CreateInference` on a `project/default` ARN.
+- **A `us.`-prefixed model ID is a cross-region inference profile.** It needs
+  `bedrock:InvokeModel` on the underlying foundation-model ARN in *every* member
+  region (`us-east-1`, `us-east-2`, `us-west-2`), not just on the profile ARN —
+  Bedrock routes across them and a profile-only grant fails intermittently.
+- **Bedrock's Anthropic use-case form is per-region, and gates every Anthropic
+  model.** Without it every call returns 404 *"Model use case details have not
+  been submitted"*. Submitted for `us-east-1`; `us-east-2` is still ungated. One
+  call can slip through before the gate applies, so never trust a single success.
 - **YouTube Watch Later is not readable via the Data API.** Google removed `WL`
   access in 2016. This is why the trigger is a user-created playlist. Do not
   "fix" this.

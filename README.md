@@ -101,15 +101,20 @@ OIDC, with no long-lived AWS credentials stored in the repo. To wire it up:
    `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`), unless
    the account already has one.
 2. Create an IAM role that trusts that provider, with a trust policy condition
-   scoping `token.actions.githubusercontent.com:sub` to this repository (e.g.
-   `repo:<owner>/<repo>:ref:refs/heads/main`), and permissions to deploy the stack.
+   scoping `token.actions.githubusercontent.com:sub` to this repository, and
+   permissions to deploy the stack. Read the `sub` claim from a real workflow run
+   rather than assuming its shape — accounts with immutable subject claims emit
+   `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main`, and a trust
+   policy pinning the documented `repo:<owner>/<repo>:...` form silently fails
+   with `Not authorized to perform sts:AssumeRoleWithWebIdentity`.
 3. In the repo's Settings → Secrets and variables → Actions → Variables, add
    `AWS_DEPLOY_ROLE_ARN` (the role's ARN), `AWS_REGION` (the deploy region), and
-   the four stack context values the CDK app needs: `PLAYLIST_ID`,
-   `VAULT_REPO_OWNER`, `VAULT_REPO_NAME`, and `BEDROCK_REGION`.
+   the five stack context values the CDK app needs: `PLAYLIST_ID`,
+   `VAULT_REPO_OWNER`, `VAULT_REPO_NAME`, `BEDROCK_REGION`, and
+   `BEDROCK_MODEL_ID`.
 
-Without all six variables set, the deploy workflow fails at the credentials step
-or deploys the stack with unusable placeholder context.
+Without all seven variables set, the deploy workflow fails at the credentials
+step or deploys the stack with unusable placeholder context.
 
 ## License
 

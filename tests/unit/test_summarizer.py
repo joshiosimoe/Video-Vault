@@ -52,9 +52,24 @@ def test_summarize_parses_structured_output():
     assert result.tags == ["python"]
 
 
-def test_summarize_uses_correct_bedrock_model_id():
+def test_summarize_defaults_to_the_configured_bedrock_model_id():
+    # Sonnet 5 is the model the design spec chose, but this AWS account is not
+    # entitled to it: get-foundation-model-availability reports AUTHORIZED while
+    # the inference endpoint returns "not available for this account". Sonnet 4.6
+    # is entitled and serves the same request shape, so it is the default until
+    # the Sonnet 5 entitlement resolves.
     client = _fake_client(PAYLOAD)
     Summarizer(client).summarize(META, TRANSCRIPT)
+    kwargs = client.messages.create.call_args.kwargs
+    assert kwargs["model"] == "us.anthropic.claude-sonnet-4-6"
+
+
+def test_summarize_uses_an_explicitly_configured_model_id():
+    # The model is configuration, not a constant: swapping back to Sonnet 5 once
+    # the entitlement lands must be a variable change and a redeploy, not a code
+    # change. The classic Bedrock client serves both models.
+    client = _fake_client(PAYLOAD)
+    Summarizer(client, model_id="anthropic.claude-sonnet-5").summarize(META, TRANSCRIPT)
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["model"] == "anthropic.claude-sonnet-5"
 

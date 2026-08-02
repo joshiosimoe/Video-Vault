@@ -7,7 +7,17 @@ from src.shared.models import Summary, Transcript, VideoMeta
 from src.summarize.prompt import SYSTEM_PROMPT, build_user_message
 from src.summarize.schema import SUMMARY_SCHEMA
 
-MODEL_ID = "anthropic.claude-sonnet-5"
+# The spec chose Sonnet 5, but this AWS account is not entitled to it -- Bedrock
+# reports AUTHORIZED while the inference endpoint returns "not available for this
+# account". Sonnet 4.6 is entitled and serves an identical request shape, so it is
+# the default. The `us.` prefix selects the cross-region inference profile, which
+# is how Bedrock exposes this model for on-demand use.
+#
+# The model is configuration rather than a constant so that swapping back is a
+# variable change and a redeploy. The classic AnthropicBedrock client serves both
+# models; AnthropicBedrockMantle serves only Sonnet 5, which is why it is not used
+# here despite being the newer surface.
+DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
 MAX_TOKENS = 8192
 
 
@@ -16,12 +26,13 @@ class SummarizationFailed(Exception):
 
 
 class Summarizer:
-    def __init__(self, client) -> None:
+    def __init__(self, client, model_id: str = DEFAULT_MODEL_ID) -> None:
         self._client = client
+        self._model_id = model_id
 
     def summarize(self, meta: VideoMeta, transcript: Transcript) -> Summary:
         response = self._client.messages.create(
-            model=MODEL_ID,
+            model=self._model_id,
             max_tokens=MAX_TOKENS,
             thinking={"type": "disabled"},
             output_config={
@@ -43,7 +54,7 @@ class Summarizer:
 
 
 def build_summarizer() -> Summarizer:
-    from anthropic import AnthropicBedrockMantle
+    from anthropic import AnthropicBedrock
 
-    client = AnthropicBedrockMantle(aws_region=os.environ["BEDROCK_REGION"])
-    return Summarizer(client)
+    client = AnthropicBedrock(aws_region=os.environ["BEDROCK_REGION"])
+    return Summarizer(client, os.environ.get("BEDROCK_MODEL_ID", DEFAULT_MODEL_ID))
